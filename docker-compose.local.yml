@@ -1,0 +1,86 @@
+services:
+  floci:
+    image: floci/floci:latest
+    container_name: vidp-aws-local
+    ports:
+      - "4566:4566"
+    restart: unless-stopped
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:0.60.6
+    container_name: vidp-cadvisor
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: vidp-prometheus
+    network_mode: host
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - cadvisor
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: vidp-grafana
+    network_mode: host
+    extra_hosts:
+      - "prometheus:127.0.0.1"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./monitoring/grafana-datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  api-aggregator:
+    build: ./cloud/api-aggregator
+    container_name: vidp-cloud-api
+    environment:
+      - AWS_ENDPOINT_URL=http://floci:4566
+      - AWS_DEFAULT_REGION=eu-west-3
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - S3_BUCKET=vidp-videos
+      - DDB_TABLE=vidp-metadata
+      - EDGE_NODE_TOKEN=dev-edge-token-change-me
+    ports:
+      - "8000:8000"
+    depends_on:
+      - floci
+    restart: unless-stopped
+
+  web-viewer:
+    image: nginx:alpine
+    container_name: vidp-web-viewer
+    volumes:
+      - ./cloud/web-viewer/index.html:/usr/share/nginx/html/index.html:ro
+    ports:
+      - "8082:80"
+    depends_on:
+      - api-aggregator
+    restart: unless-stopped
+
+  rapl-exporter:
+    build: ./monitoring/rapl-exporter
+    container_name: vidp-rapl-exporter
+    privileged: true
+    volumes:
+      - /sys/devices/virtual/powercap:/powercap:ro
+    ports:
+      - "9106:9106"
+    restart: unless-stopped

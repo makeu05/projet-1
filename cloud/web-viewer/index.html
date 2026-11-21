@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VidP-Edge — Tableau de bord Vidéo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 24px; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+    h1 { margin: 0; color: #38bdf8; }
+    button, .btn { background: #1d4ed8; color: #fff; border: none; padding: 7px 12px; border-radius: 6px; cursor: pointer; text-decoration: none; font-size: 13px; display: inline-block; }
+    button.danger { background: #b91c1c; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 14px; }
+    video { width: 100%; max-height: 320px; border-radius: 6px; background: #000; margin-top: 8px; }
+    .badge { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 12px; margin: 4px 4px 0 0; background: #334155; }
+    .ok { background: #065f46; color: #a7f3d0; }
+    .warn { background: #78350f; color: #fde68a; }
+    .subs { background: #0f172a; border-left: 3px solid #38bdf8; padding: 8px; margin-top: 8px; font-size: 13px; white-space: pre-wrap; max-height: 110px; overflow-y: auto; }
+    .actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .meta { font-size: 12px; color: #94a3b8; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div>
+      <h1>VidP-Edge — Flux &amp; Métadonnées Cloud</h1>
+      <span id="status">Chargement...</span>
+    </div>
+    <div>
+      <button onclick="load(true)">Rafraîchir</button>
+      <button class="danger" onclick="clearAll()">Vider l'historique</button>
+    </div>
+  </div>
+  <div id="grid" class="grid"></div>
+
+  <script>
+    const API = window.location.port === "8082" ? "http://localhost:8000" : "";
+    const renderedIds = new Set();
+
+    function cleanVttText(vtt) {
+      if (!vtt) return "";
+      return vtt.replace(/^WEBVTT\s*/i, "").trim();
+    }
+
+    function buildCard(s) {
+      const div = document.createElement("div");
+      div.className = "card";
+      div.id = "card-" + s.segment_id;
+      const animals = (s.animals_detected || []).map(a => `${a.label} (${Math.round((a.confidence || 0)*100)}%)`).join(", ") || "Aucun";
+      const videoUrl = s.s3_video_key ? `${API}/api/media/${s.s3_video_key}` : "";
+      const vttUrl = s.s3_subtitles_key ? `${API}/api/media/${s.s3_subtitles_key}` : "";
+      const subsText = cleanVttText(s.subtitles_vtt);
+
+      const videoHtml = videoUrl
+        ? `<video controls preload="metadata" crossorigin="anonymous">
+             <source src="${videoUrl}" type="video/mp4" />
+             ${vttUrl ? `<track label="Sous-titres" kind="subtitles" srclang="${s.language || 'fr'}" src="${vttUrl}" default />` : ""}
+           </video>`
+        : `<div class="meta"><em>Métadonnées seules (aucun extrait vidéo envoyé — économie WAN)</em></div>`;
+
+      div.innerHTML = `
+        <strong>${s.segment_id}</strong><br/>
+        <span class="badge ok">Mode: ${s.mode}</span>
+        <span class="badge">${s.resolution || "-"}</span>
+        <span class="badge ${s.language ? 'ok' : ''}">Langue: ${s.language || "N/A"}</span>
+        <span class="badge warn">Animaux: ${animals}</span>
+        ${videoHtml}
+        ${subsText ? `<div class="subs"><strong>Sous-titres :</strong>\n${subsText}</div>` : ""}
+        <div class="actions">
+          ${videoUrl ? `<a class="btn" href="${videoUrl}" download="${s.segment_id}.mp4">Télécharger vidéo</a>` : ""}
+          ${vttUrl ? `<a class="btn" href="${vttUrl}" download="${s.segment_id}.vtt">Télécharger .vtt</a>` : ""}
+        </div>
+        <div class="meta">Nœud: ${s.node_id} | Latence E2E: <b>${s.e2e_latency_ms} ms</b></div>
+      `;
+      return div;
+    }
+
+    async function load(force = false) {
+      try {
+        const res = await fetch(`${API}/api/segments`);
+        const data = await res.json();
+        document.getElementById("status").textContent = `${data.items.length} segment(s) reçu(s)`;
+        const grid = document.getElementById("grid");
+
+        if (force) {
+          grid.innerHTML = "";
+          renderedIds.clear();
+        }
+        // Ajoute uniquement les nouveaux segments en haut, sans interrompre les lecteurs video
+        const itemsAsc = [...data.items].reverse();
+        for (const s of itemsAsc) {
+          if (!renderedIds.has(s.segment_id)) {
+            renderedIds.add(s.segment_id);
+            grid.prepend(buildCard(s));
+          }
+        }
+      } catch (e) {
+        document.getElementById("status").textContent = "Erreur de connexion à l'API Cloud.";
+      }
+    }
+
+    async function clearAll() {
+      await fetch(`${API}/api/segments`, { method: "DELETE" });
+      load(true);
+    }
+
+    load(true);
+    setInterval(() => load(false), 5000);
+  </script>
+</body>
+</html>

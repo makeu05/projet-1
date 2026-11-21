@@ -1,0 +1,17 @@
+.env
+*.env
+*secrets*
+*.pem
+*.key
+*credentials*
+*.tfvars
+*.tfstate
+*.tfstate.*
+.terraform/
+.localdata/
+*.sqlite
+*.db
+__pycache__/
+.venv/
+dataset/
+deploy/inventory.aws.ini

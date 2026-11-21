@@ -1,0 +1,189 @@
+---
+- name: Provisionner le noeud Edge VidP-Edge
+  hosts: edge
+  become: true
+
+  vars:
+    pipeline_mode: "adaptive-hybrid"
+    selective_transfer: "true"
+
+  tasks:
+    - name: Installer Docker, Compose v2, chrony et iproute2
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - docker-compose-v2
+          - chrony
+          - iproute2
+          - curl
+          - jq
+        state: present
+        update_cache: true
+
+    - name: Activer docker et chrony
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - docker
+        - chrony
+
+    - name: Ajouter l'utilisateur au groupe docker
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+    - name: Creer les dossiers de travail Edge
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0755"
+      loop:
+        - /opt/vidp-edge
+        - /opt/vidp-edge/data/inbox
+        - /opt/vidp-edge/data/processed
+        - /opt/vidp-edge/data/done
+        - /opt/vidp-edge/data/buffer
+        - /opt/vidp-edge/data/policy
+
+    - name: Copier les microservices Edge sur la VM
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../edge/"
+        dest: /opt/vidp-edge/src/
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0755"
+
+    - name: Deployer le docker-compose complet du noeud Edge
+      ansible.builtin.copy:
+        dest: /opt/vidp-edge/docker-compose.yml
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0644"
+        content: |
+          services:
+            downscale-splitter:
+              build: ./src/downscale-splitter
+              container_name: edge-downscale-splitter
+              environment:
+                - TARGET_HEIGHT=360
+                - SEG_SECONDS=10
+                - PIPELINE_MODE=${PIPELINE_MODE:-adaptive-hybrid}
+              volumes:
+                - ./data:/data
+              cpus: "1.0"
+              mem_limit: 512m
+              restart: unless-stopped
+
+            lang-subtitle:
+              build: ./src/lang-subtitle
+              container_name: edge-lang-subtitle
+              volumes:
+                - ./data:/data
+              cpus: "1.5"
+              mem_limit: 768m
+              restart: unless-stopped
+
+            animal-detect:
+              build: ./src/animal-detect
+              container_name: edge-animal-detect
+              volumes:
+                - ./data:/data
+              cpus: "1.0"
+              mem_limit: 512m
+              restart: unless-stopped
+
+            buffer-sender:
+              build: ./src/buffer-sender
+              container_name: edge-buffer-sender
+              environment:
+                - CLOUD_API_URL=http://192.168.122.1:8000/api/segments
+                - EDGE_NODE_TOKEN=dev-edge-token-change-me
+                - NODE_ID=edge-vm-01
+                - PIPELINE_MODE=${PIPELINE_MODE:-adaptive-hybrid}
+                - SELECTIVE_TRANSFER={{ selective_transfer }}
+              volumes:
+                - ./data:/data
+              ports:
+                - "9105:9105"
+              cpus: "0.5"
+              mem_limit: 256m
+              restart: unless-stopped
+
+            cadvisor:
+              image: ghcr.io/google/cadvisor:0.60.6
+              container_name: edge-cadvisor
+              privileged: true
+              devices:
+                - /dev/kmsg
+              volumes:
+                - /:/rootfs:ro
+                - /var/run:/var/run:ro
+                - /sys:/sys:ro
+                - /var/lib/docker/:/var/lib/docker:ro
+                - /dev/disk/:/dev/disk:ro
+              ports:
+                - "8081:8080"
+              restart: unless-stopped
+
+            node-exporter:
+              image: prom/node-exporter:latest
+              container_name: edge-node-exporter
+              network_mode: host
+              pid: host
+              volumes:
+                - /:/host:ro,rslave
+              command:
+                - '--path.rootfs=/host'
+              restart: unless-stopped
+
+            ebpf-exporter:
+              image: ghcr.io/cloudflare/ebpf_exporter:v2.4.2
+              container_name: edge-ebpf-exporter
+              privileged: true
+              volumes:
+                - /sys/fs/cgroup:/sys/fs/cgroup:ro
+              command:
+                - '--config.dir=examples'
+                - '--config.names=tcp-syn-backlog,tcp-window-clamps,timers'
+              ports:
+                - "9435:9435"
+              restart: unless-stopped
+
+
+    - name: Ecrire le fichier .env du noeud Edge
+      ansible.builtin.copy:
+        dest: /opt/vidp-edge/.env
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0644"
+        content: |
+          PIPELINE_MODE={{ pipeline_mode }}
+
+    - name: Copier les scripts tc sur le noeud Edge
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/{{ item }}"
+        dest: "/opt/vidp-edge/{{ item }}"
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - tc_limit.sh
+        - tc_cut_2min.sh
+
+    - name: Autoriser sudo sans mot de passe uniquement pour les scripts tc
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/vidp-tc
+        mode: "0440"
+        validate: "visudo -cf %s"
+        content: |
+          {{ ansible_user }} ALL=(ALL) NOPASSWD: /opt/vidp-edge/tc_limit.sh, /opt/vidp-edge/tc_cut_2min.sh
+
+    - name: Builder et demarrer toute la stack Edge
+      ansible.builtin.command:
+        cmd: docker compose up -d --build
+        chdir: /opt/vidp-edge
